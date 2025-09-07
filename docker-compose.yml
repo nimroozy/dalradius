@@ -1,0 +1,177 @@
+version: '3.8'
+
+services:
+  # MySQL Database
+  mysql:
+    image: mysql:8.0
+    container_name: isp-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: radius123
+      MYSQL_DATABASE: radiusdb
+      MYSQL_USER: radius
+      MYSQL_PASSWORD: radius123
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./docker/mysql/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "3306:3306"
+    networks:
+      - isp-network
+
+  # Redis for caching
+  redis:
+    image: redis:7-alpine
+    container_name: isp-redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    networks:
+      - isp-network
+
+  # ISP Management System Frontend
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: isp-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "1812:1812/udp"
+      - "1813:1813/udp"
+    environment:
+      - NODE_ENV=production
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - DB_NAME=radiusdb
+      - DB_USER=radius
+      - DB_PASS=radius123
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - mysql
+      - redis
+    volumes:
+      - ./logs:/var/log
+      - ./config:/app/config
+    networks:
+      - isp-network
+
+  # Backend API (if separate)
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: isp-backend
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    environment:
+      - NODE_ENV=production
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - DB_NAME=radiusdb
+      - DB_USER=radius
+      - DB_PASS=radius123
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - mysql
+      - redis
+    volumes:
+      - ./logs:/var/log
+      - ./config:/app/config
+    networks:
+      - isp-network
+
+  # FreeRADIUS Server
+  freeradius:
+    image: freeradius/freeradius-server:latest
+    container_name: isp-freeradius
+    restart: unless-stopped
+    ports:
+      - "1812:1812/udp"
+      - "1813:1813/udp"
+    environment:
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - DB_NAME=radiusdb
+      - DB_USER=radius
+      - DB_PASS=radius123
+    depends_on:
+      - mysql
+    volumes:
+      - ./docker/freeradius/:/etc/freeradius/3.0/
+      - ./logs/freeradius:/var/log/freeradius
+    networks:
+      - isp-network
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: isp-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./docker/nginx/conf.d:/etc/nginx/conf.d
+      - ./docker/nginx/ssl:/etc/nginx/ssl
+      - ./logs/nginx:/var/log/nginx
+    depends_on:
+      - frontend
+      - backend
+    networks:
+      - isp-network
+
+  # Monitoring with Prometheus
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: isp-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    networks:
+      - isp-network
+
+  # Grafana for visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: isp-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin123
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning
+    depends_on:
+      - prometheus
+    networks:
+      - isp-network
+
+volumes:
+  mysql_data:
+    driver: local
+  redis_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+networks:
+  isp-network:
+    driver: bridge
