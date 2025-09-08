@@ -312,26 +312,29 @@ deploy_application() {
     mkdir -p $PROJECT_DIR
     cd $PROJECT_DIR
     
-    # Clone or copy the application
+    # Clone the application from GitHub
+    print_status "Cloning application from GitHub..."
     if [ -d ".git" ]; then
         git pull origin main
     else
-        # If running from local directory, copy files
-        if [ -f "package.json" ]; then
-            cp -r . $PROJECT_DIR/
-        else
-            print_error "Application files not found. Please ensure you're running from the project directory."
-            exit 1
-        fi
+        git clone https://github.com/nimroozy/dalradius.git .
     fi
     
     # Install dependencies
     print_status "Installing application dependencies..."
-    pnpm install
+    if command -v pnpm &> /dev/null; then
+        pnpm install
+    else
+        npm install
+    fi
     
     # Build application
     print_status "Building application..."
-    pnpm run build
+    if command -v pnpm &> /dev/null; then
+        pnpm run build
+    else
+        npm run build
+    fi
     
     # Set permissions
     chown -R $SERVICE_USER:$SERVICE_USER $PROJECT_DIR
