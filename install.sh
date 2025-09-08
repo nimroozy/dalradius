@@ -114,21 +114,43 @@ configure_mysql() {
     systemctl start mysql
     systemctl enable mysql
     
+    # Check if MySQL root user exists and configure authentication
+    print_status "Configuring MySQL root user authentication..."
+    
+    # Try to connect without password first (auth_socket plugin)
+    if mysql -u root -e "SELECT 1;" 2>/dev/null; then
+        print_status "MySQL root user uses auth_socket, configuring password authentication..."
+        mysql -u root -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${DB_PASS}';"
+        mysql -u root -e "FLUSH PRIVILEGES;"
+    elif mysql -u root -p${DB_PASS} -e "SELECT 1;" 2>/dev/null; then
+        print_status "MySQL root user already has password authentication configured."
+    else
+        print_error "Cannot connect to MySQL. Please check MySQL installation."
+        return 1
+    fi
+    
     # Secure MySQL installation
-    mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${DB_PASS}';"
-    mysql -e "DELETE FROM mysql.user WHERE User='';"
-    mysql -e "DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');"
-    mysql -e "DROP DATABASE IF EXISTS test;"
-    mysql -e "DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';"
-    mysql -e "FLUSH PRIVILEGES;"
+    print_status "Securing MySQL installation..."
+    mysql -u root -p${DB_PASS} -e "DELETE FROM mysql.user WHERE User='';" 2>/dev/null || true
+    mysql -u root -p${DB_PASS} -e "DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');" 2>/dev/null || true
+    mysql -u root -p${DB_PASS} -e "DROP DATABASE IF EXISTS test;" 2>/dev/null || true
+    mysql -u root -p${DB_PASS} -e "DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';" 2>/dev/null || true
+    mysql -u root -p${DB_PASS} -e "FLUSH PRIVILEGES;"
     
     # Create radius database and user
+    print_status "Creating radius database and user..."
     mysql -u root -p${DB_PASS} -e "CREATE DATABASE IF NOT EXISTS ${DB_NAME};"
     mysql -u root -p${DB_PASS} -e "CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';"
     mysql -u root -p${DB_PASS} -e "GRANT ALL PRIVILEGES ON ${DB_NAME}.* TO '${DB_USER}'@'localhost';"
     mysql -u root -p${DB_PASS} -e "FLUSH PRIVILEGES;"
     
-    print_success "MySQL configured successfully"
+    # Test the connection
+    if mysql -u ${DB_USER} -p${DB_PASS} -e "SELECT 1;" 2>/dev/null; then
+        print_success "MySQL configured successfully"
+    else
+        print_error "Failed to configure MySQL. Please check the configuration."
+        return 1
+    fi
 }
 
 # Function to configure FreeRADIUS
@@ -251,13 +273,24 @@ server default {
 EOF
     
     # Import database schema
-    mysql -u root -p${DB_PASS} ${DB_NAME} < /etc/freeradius/3.0/mods-config/sql/main/mysql/schema.sql
+    if [ -f "/etc/freeradius/3.0/mods-config/sql/main/mysql/schema.sql" ]; then
+        mysql -u root -p${DB_PASS} ${DB_NAME} < /etc/freeradius/3.0/mods-config/sql/main/mysql/schema.sql
+        print_status "FreeRADIUS database schema imported"
+    else
+        print_warning "FreeRADIUS schema file not found, skipping schema import"
+    fi
     
     # Start FreeRADIUS
     systemctl start freeradius
     systemctl enable freeradius
     
-    print_success "FreeRADIUS configured successfully"
+    # Test FreeRADIUS configuration
+    if systemctl is-active --quiet freeradius; then
+        print_success "FreeRADIUS configured successfully"
+    else
+        print_error "FreeRADIUS failed to start. Please check the configuration."
+        return 1
+    fi
 }
 
 # Function to create project user
@@ -600,8 +633,19 @@ main() {
     
     update_system
     install_packages
-    configure_mysql
-    configure_freeradius
+    
+    # Configure MySQL with error handling
+    if ! configure_mysql; then
+        print_error "MySQL configuration failed. Please check the logs and try again."
+        exit 1
+    fi
+    
+    # Configure FreeRADIUS with error handling
+    if ! configure_freeradius; then
+        print_error "FreeRADIUS configuration failed. Please check the logs and try again."
+        exit 1
+    fi
+    
     create_project_user
     deploy_application
     configure_nginx
